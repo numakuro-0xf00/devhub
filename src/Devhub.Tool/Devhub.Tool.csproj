@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- dotnet tool として配布(FR-2.1) -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>devhub</ToolCommandName>
+    <AssemblyName>devhub</AssemblyName>
+    <RootNamespace>Devhub.Tool</RootNamespace>
+    <PackageId>Devhub.Tool</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>devhub team</Authors>
+    <Description>チーム共有 coding agent 設定を rulesync 経由で各エージェント(Claude Code / Cursor / Copilot / Codex)へ配置する dotnet tool。</Description>
+  </PropertyGroup>
+
+</Project>
