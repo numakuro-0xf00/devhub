@@ -55,3 +55,7 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# devhub Phase 0: Claude Code へのスキルブリッジは bootstrap で生成される派生物
+# 単一ソースは .agents/skills/。実体はコミットしない。
+.claude/skills/
