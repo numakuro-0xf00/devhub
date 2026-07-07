@@ -189,7 +189,7 @@ skill / subagent(agent) / MCP サーバー設定 / 指示ファイル(AGENTS.md�
 
 | # | 判断 | 内容 |
 |---|---|---|
-| D-1 | 変換エンジンは**既存 OSS をラップ** | C# 内製せず、Ruler もしくは rulesync を dotnet tool からラップ。内製はチーム固有の接着に限定(NFR-7) |
+| D-1 | 変換エンジンは**既存 OSS をラップ**(**rulesync** 採用) | C# 内製せず、**rulesync** を dotnet tool からラップ。実地比較(`doc/phase1-tool-eval.md`)で、FR-1 が要求する MCP・hooks・permissions を4エージェント全てでカバーできるのは rulesync と確認(Ruler は hooks/permissions 非対応・Copilot MCP 未生成)。内製はチーム固有の接着に限定(NFR-7) |
 | D-2 | **既存 OSS を最優先・内製最小化** | 一般分野(変換・テレメトリ収集・ログ集積・レダクション)は既存/無料 OSS を流用(NFR-7) |
 | D-3 | FR-5(ログ集積・レコメンド)は**後回し** | 初期スコープ外。Phase 3 で扱う。要件は残す |
 | D-4 | Claude Code の AGENTS.md 対応は**リンク方式で一時解決** | `CLAUDE.md` → `AGENTS.md` の import/シンボリックリンク。ネイティブ対応まで暫定 |
@@ -203,7 +203,8 @@ skill / subagent(agent) / MCP サーバー設定 / 指示ファイル(AGENTS.md�
 | R-1 | Copilot 可視化不可 | 設定単位の利用データが公式 API にない | 利用有無まで割り切る(D-5・FR-4.4) |
 | R-2 | 秘匿混入 | ログ/利用イベントにコード/鍵が混入し得る | 保存前レダクション+匿名化必須(FR-5.2・NFR-2) |
 | R-3 | 仕様追従コスト | 4エージェントとも月単位で変化(プラグイン自動更新バグ、Cursor Organizations 成熟途上、Copilot BYOK 制約 等) | アダプタ分離(NFR-6)。付録 in-flux 項目を定期再検証 |
-| R-4 | ラップ対象 OSS の追従性 | Ruler/rulesync 側の対応形式・更新に依存 | どちらを採るかは設計時に比較(対応形式・MCP 対応・更新頻度)。差し替え可能に抽象化 |
+| R-4 | ラップ対象 OSS(rulesync)の追従性 | rulesync の対応形式・更新に依存。リモート MCP の `type` 値など各エージェント固有の癖で出力がずれ得る(Ruler は `remote`、rulesync は `http`) | 出力に対する後処理アダプタで補正。差し替え可能な抽象境界を保つ(`doc/phase1-tool-eval.md`) |
+| R-6 | 生成物が CLAUDE.md を上書き | rulesync/Ruler とも CLAUDE.md を全文で上書きし、Phase 0 の `@AGENTS.md` ブリッジ+開発ガイドを消す | claudecode の `rules` 生成を除外し Phase 0 の CLAUDE.md を正とする(`doc/phase1-tool-eval.md`) |
 | R-5 | Claude Code の癖 | CLI プラグイン自動インストール非対応・`mcp add` 書き戻しバグ | entrypoint 自動化・CI チェックで吸収 |
 
 ---
