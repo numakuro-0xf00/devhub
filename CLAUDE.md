@@ -22,7 +22,12 @@ devhub は、プライベートな開発チーム内で coding agent の設定(s
 
 ## 現在の状態
 
-リポジトリはグリーンフィールド(初期状態)。ソリューション・プロジェクトファイルはまだ存在しない。新しくコードを追加する際は、リポジトリルートにソリューションを置く標準的な .NET 構成(`src/` にプロジェクト、`tests/` にテストプロジェクト)から始めること。
+Phase 0(共有基盤)と Phase 1 の dotnet tool スケルトンが実装済み。
+
+- `src/Devhub.Tool/` — `devhub` dotnet tool。rulesync をラップして各エージェント設定を生成(`devhub apply` / `check`)。中核は `RulesyncPlanner`(純粋ロジック・テスト対象)。
+- `tests/Devhub.Tool.Tests/` — xUnit テスト。
+- `AGENTS.md` / `.agents/skills/` — 共有設定の単一ソース(Phase 0)。
+- `doc/` — `requirements.md`(要件・設計判断)、`phase0.md`、`phase1.md`、`phase1-tool-eval.md`(Ruler vs rulesync 比較)。
 
 要件は `doc/requirements.md` に整理済み(4エージェント調査+確定した設計判断にもとづく)。着手前に必ず参照すること。要点:
 - 中核は「単一ソース git リポジトリ → dotnet tool でエージェント別ネイティブ設定を生成・配置」。変換エンジンは**既存 OSS(Ruler / rulesync)を dotnet tool でラップ**し、内製はチーム固有の接着に限定(既存 OSS 優先・内製最小化=NFR-7)。
@@ -34,13 +39,11 @@ devhub は、プライベートな開発チーム内で coding agent の設定(s
 
 ## 開発コマンド
 
-ソリューション作成後は標準の dotnet CLI を使う:
-
 ```bash
-dotnet build                 # ビルド
+dotnet build                 # ソリューション全体をビルド
 dotnet test                  # 全テスト実行
 dotnet test --filter "FullyQualifiedName~<テスト名>"   # 単一テストの実行
-dotnet run --project src/<プロジェクト名>              # 実行
+dotnet run --project src/Devhub.Tool -- --help         # ツールをローカル実行
 ```
 
 ## C# コードナビゲーション
