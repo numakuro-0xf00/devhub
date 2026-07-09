@@ -10,13 +10,14 @@
 - `devhub apply` — `.rulesync/` から各エージェント設定を生成。
 - `devhub check` — 生成物がソースと一致するか検査(rulesync `--check`、ドリフト時 exit 1)+ 秘匿情報スキャン(`--no-secrets` でスキップ可)。CI 向け。
 - `devhub secrets` — 設定ソース・生成物への秘匿情報の実値混入を検査(後述)。
+- `devhub env` — 必要な環境変数の一覧化・未設定検出・`.env.example` 生成・対話的穴埋め(後述)。
 - `devhub --version` / `--help`。
 - **CLAUDE.md 保護**(既定 ON)— 後述。実バイナリで 2 パス動作を確認済み。
 - **features 絞り込み**(後述)— `.rulesync/` に実在する機能だけを rulesync に渡す。
 - Node/npx 不在時の明示エラー(exit 3)。
 - **publish パイプライン** — CI(build+test)と `v*` タグでの GitHub Packages への publish(後述)。
 
-未実装(今後):初期化スキル(FR-2.4、必要な環境変数の一覧化と穴埋め支援)、リモート MCP `type` 値ドリフト(R-4)への後処理アダプタ。
+未実装(今後):リモート MCP `type` 値ドリフト(R-4)への後処理アダプタ(実際のドリフト事例が出てから対応)。
 
 ## プロジェクト構成
 
@@ -27,13 +28,18 @@ devhub.sln
     release.yml                   # v* タグで pack → GitHub Packages へ push
 src/Devhub.Tool/
     Devhub.Tool.csproj            # PackAsTool, ToolCommandName=devhub, net8.0, pack メタデータ
-    Program.cs                    # CLI ディスパッチ(apply/check/secrets/--version/--help)
+    Program.cs                    # CLI ディスパッチ(apply/check/secrets/env/--version/--help)
     RulesyncPlanner.cs            # apply を rulesync 呼び出し列へ展開する純粋ロジック(テスト対象)
     RulesyncFeatureDetector.cs    # .rulesync/ の実在機能を検出し features を絞る純粋ロジック(テスト対象)
     RulesyncRunner.cs             # rulesync を子プロセス実行する薄いラッパー
     SecretScanPlanner.cs          # 秘匿情報スキャンの対象決定(純粋ロジック・テスト対象)
     SecretlintConfigResolver.cs   # .secretlintrc.json の解決(リポジトリ優先、無ければ内蔵既定)
     SecretlintRunner.cs           # secretlint を子プロセス実行する薄いラッパー
+    EnvPlaceholderScanner.cs      # テキストから ${VAR} プレースホルダを抽出(純粋ロジック・テスト対象)
+    EnvFileParser.cs              # .env / .env.example の素朴なパース(純粋ロジック・テスト対象)
+    EnvVarResolver.cs             # 変数ごとの充足状態の解決(純粋ロジック・テスト対象)
+    EnvExampleMerger.cs           # .env.example への追記マージ計画(純粋ロジック・テスト対象)
+    EnvFileScanner.cs             # .rulesync/ 配下のテキスト走査(薄い IO ラッパー)
 tests/Devhub.Tool.Tests/          # 純粋ロジックのユニットテスト(xUnit)
 ```
 
@@ -73,6 +79,19 @@ feature → ソースの対応(rulesync@9.2.0 で実測):
 - スキャン対象は設定ソースと生成物のうち実在するもの:`.rulesync/` `AGENTS.md` `CLAUDE.md` `.claude/` `.cursor/` `.codex/` `.github/` `.mcp.json` `.agents/`。`node_modules/` `bin/` `obj/` `.git/` は除外。
 - 対象決定は `SecretScanPlanner`、設定解決は `SecretlintConfigResolver` に純粋関数として実装し、ユニットテスト対象。
 
+## 初期化支援 `devhub env`(要件 FR-2.4)
+
+秘匿情報は実値を commit せず `${VAR}` プレースホルダで参照する(FR-3.1)。そのため新メンバーは「どの環境変数を用意すればよいか」を知る必要がある。`devhub env` は `.rulesync/` 配下のテキストから `${VAR}` / `${VAR:-default}` 形式のプレースホルダを抽出し、穴埋めを支援する:
+
+| コマンド | 動作 | exit |
+|---|---|---|
+| `devhub env` | 変数ごとに設定済み/未設定を一覧表示(**値は表示しない** — NFR-1) | 常に 0 |
+| `devhub env --check` | 同上+未設定が 1 つでもあれば失敗(オンボーディングゲート用) | 未設定あり 1 |
+| `devhub env --write-example` | `.env.example` を生成。既存ファイルは保持し不足行のみ追記 | 0 |
+| `devhub env --fill` | 未設定変数を対話的に質問し `.env` へ追記(入力はマスク表示) | 対話不能環境 2 |
+
+「設定済み」= OS 環境変数またはリポジトリルートの `.env`(gitignore 済み)に非空値がある。Node 不要の純 C# 実装で、抽出・パース・解決・マージ計画は純粋ロジックとしてユニットテスト対象。
+
 ## publish パイプライン
 
 - `.github/workflows/ci.yml` — main / `phase*` ブランチへの push と PR で `dotnet build` + `dotnet test`(Release)。
@@ -98,6 +117,7 @@ dotnet new tool-manifest                 # .config/dotnet-tools.json
 dotnet tool install --local Devhub.Tool  # フィードから
 # オンボーディング
 dotnet tool restore && devhub apply
+devhub env --fill    # 未設定の環境変数を対話的に .env へ穴埋め
 # CI
 devhub check
 ```
