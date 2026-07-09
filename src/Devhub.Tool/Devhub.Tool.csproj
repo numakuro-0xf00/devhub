@@ -16,6 +16,17 @@
     <Version>0.1.0</Version>
     <Authors>devhub team</Authors>
     <Description>チーム共有 coding agent 設定を rulesync 経由で各エージェント(Claude Code / Cursor / Copilot / Codex)へ配置する dotnet tool。</Description>
+
+    <!-- プライベート NuGet フィード(GitHub Packages)経由の配布メタデータ(FR-2.1) -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/numakuro-0xf00/devhub</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/numakuro-0xf00/devhub</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>
