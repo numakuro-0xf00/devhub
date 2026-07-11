@@ -27,7 +27,7 @@
 | D-P2-3 | 匿名化(擬似ID化)は**送信側で HMAC-SHA256** | 収集基盤側に匿名化機能は無い(調査で確認)。生の識別子をネットワークに流さない(NFR-2)。キーはチーム共有ソルト `${DEVHUB_TELEMETRY_SALT}` |
 | D-P2-4 | `${DEVHUB_TELEMETRY_ENDPOINT}` **未設定なら送信せず即終了(no-op)** | NFR-5 のオフスイッチを環境変数の有無で実現。テレメトリを使わないメンバー/チームは何も設定しなければ何も起きない。hook 本体の動作は決してブロックしない |
 | D-P2-5 | 収集基盤は **OTel Collector(webhookeventreceiver + bearertokenauth)→ Prometheus + Loki → Grafana** | 比較調査の第1候補。収集・保存・可視化がすべて既存 OSS で、内製コードゼロ(NFR-7)。次点だった ASP.NET 自前 API は「収集エンドポイント自体が内製」になり NFR-7 の文言に反するため見送り |
-| D-P2-6 | 未使用検出は **PromQL + Grafana アラート**(設定のみ) | `time() - devhub_last_used_timestamp > threshold` で表現でき、内製はゼロ。削除は自動実行せず提案にとどめる(FR-4.3) |
+| D-P2-6 | 未使用検出は **PromQL + Grafana アラート**(設定のみ) | `increase(devhub_tool_use_total[閾値d]) == 0` で表現でき、内製はゼロ。削除は自動実行せず提案にとどめる(FR-4.3) |
 | D-P2-7 | **skill 利用はトランスクリプト事後解析で補完**(Phase 2 後半) | 3エージェントとも hooks から skill 名は取得不可(Claude Code は該当 issue が not_planned でクローズ済み=恒久ギャップ)。要件書 FR-4.1 の「補助」を「skill については必須」に格上げする |
 | D-P2-8 | Copilot は**利用有無のみ** | 設定単位の可視化は公式に不可能(FR-4.4 / D-5)。ダッシュボード上に制約を明示する |
 
@@ -59,8 +59,9 @@ Step 3 の全成果物(OTTL 変換・ダッシュボード・アラート)が参
 
 | メトリクス | 型 | ラベル |
 |---|---|---|
-| `devhub_tool_use_total` | Counter | `tool_name`, `agent`, `agent_type` |
-| `devhub_last_used_timestamp` | Gauge(Unix time 秒) | `tool_name`, `agent`, `agent_type` |
+| `devhub_tool_use_total` | Counter(count connector で生成) | `tool_name`, `agent`, `agent_type` |
+
+当初予定していた `devhub_last_used_timestamp`(Gauge)は **Collector 内で生成できないことが実装時に判明**した(count 系コネクタはカウンタ専用)。最終利用日時は Loki(LogQL の `last_over_time`)のパネルで表現し、未使用検出は PromQL `increase(devhub_tool_use_total[閾値d]) == 0` で行う(閾値は Grafana 変数 `unused_threshold_days`、既定 30)。
 
 ## 送信コマンド `devhub telemetry send` の契約と構成
 
@@ -70,6 +71,7 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
 - **既定では stdout / stderr に一切出力しない**(沈黙の原則)。診断は `DEVHUB_TELEMETRY_DEBUG=1` のときだけ stderr へ出す(沈黙と可観測性の両立)。
 - HTTP POST のタイムアウトは既定 **1 秒**(`DEVHUB_TELEMETRY_TIMEOUT_MS` で上書き可)。失敗・タイムアウトは黙って破棄し、リトライしない。
 - `DEVHUB_TELEMETRY_ENDPOINT` 未設定なら stdin も読まず即 exit 0(D-P2-4 の no-op)。
+- `DEVHUB_TELEMETRY_*` の解決は「**OS 環境変数 → リポジトリルートの `.env`**」の2段フォールバック(変数単位)。rulesync は hooks の `env` フィールドを3ターゲットとも変換時に**落とす**ことが実測で判明したため、`devhub env --fill` が書く `.env` を hook 実行時に読むこの経路が必須(テンプレートの `env` 宣言は `devhub env` の `${VAR}` 検出源としてのみ機能する)。
 
 内部構成は Phase 1 の規約(純粋ロジック+薄い IO)に従い分割する:
 
@@ -104,7 +106,8 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
 ## リスク・注意点
 
 - **rulesync `type:"http"` バグ**: 警告と実出力が矛盾する(上述)。将来 rulesync が修正しても、`command` 方式は動き続けるため移行は任意。R-4(rulesync 追従性)の具体事例として記録。
-- **webhookeventreceiver は beta**(contrib)。Collector のイメージをバージョンピンし、更新時に設定互換を確認する(R-3 と同種)。
+- **webhookeventreceiver は beta**(contrib)。Collector のイメージをバージョンピンし、更新時に設定互換を確認する(R-3 と同種)。なお contrib の lokiexporter は削除済みのため、Loki への出力は Loki 3.x ネイティブ OTLP 取り込み(`otlphttp` exporter → `/otlp`)を使う(実装済み)。
+- **契約テスト(`telemetry/contract-test.sh`)は docker 必須**。本設計の作業環境には docker が無く未実行(YAML/JSON/シェルの静的検証+公式ドキュメント突き合わせのみ)。**初回デプロイ時に必ず契約テストを実行して受け口〜メトリクス生成を検証すること。**
 - **Codex の信頼登録**: `devhub apply` で hooks を配布しても、各開発者が初回に `/hooks` で承認しないと動かない。オンボーディング手順に明記する。
 - **認証**: bearertokenauth の静的トークンはローテーション運用をチームで決める(ファイルベース差し替え可)。収集エンドポイントはチーム内クローズドに置く(NFR-1)。
 - **Cursor の subagent 粒度**: 固定カテゴリのみのため、カスタム subagent 別の集計は Claude Code / Codex に限られる。ダッシュボードに注記。

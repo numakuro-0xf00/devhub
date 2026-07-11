@@ -1,0 +1,48 @@
+# devhub telemetry 収集基盤 — Loki 設定(doc/phase2.md Step 3)。
+# 単一プロセス構成・ローカルファイルシステム保存(チーム内小規模ホスティングを想定)。
+#
+# 参照した公式ドキュメント:
+#   - Log retention: https://grafana.com/docs/loki/latest/operations/storage/retention/
+#       (retention は TSDB + 24h index period が前提。compactor.delete_request_store が必須)
+#   - OTLP ingestion: https://grafana.com/docs/loki/latest/send-data/otel/
+#   - 単一バイナリ構成の参考: https://github.com/grafana/loki/blob/main/cmd/loki/loki-local-config.yaml
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h # retention 機能の前提(TSDB は 24h 固定が必須)
+
+limits_config:
+  # 保持期間はここ1箇所に集約する(doc/phase2.md「方針の外出し」)。90日。
+  retention_period: 2160h # 90d
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+# チーム内クローズドな匿名化利用データすら Grafana Labs に送らない(プロジェクト全体の匿名化方針 NFR-2 に準拠)。
+analytics:
+  reporting_enabled: false
