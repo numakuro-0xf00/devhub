@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "hooks": {},
+  "claudecode": {
+    "hooks": {
+      "postToolUse": [
+        {
+          "matcher": ".*",
+          "type": "command",
+          "command": "dotnet devhub telemetry send --agent claudecode",
+          "timeout": 5,
+          "env": {
+            "DEVHUB_TELEMETRY_ENDPOINT": "${DEVHUB_TELEMETRY_ENDPOINT}",
+            "DEVHUB_TELEMETRY_TOKEN": "${DEVHUB_TELEMETRY_TOKEN}",
+            "DEVHUB_TELEMETRY_SALT": "${DEVHUB_TELEMETRY_SALT}"
+          }
+        }
+      ]
+    }
+  },
+  "cursor": {
+    "hooks": {
+      "postToolUse": [
+        {
+          "matcher": ".*",
+          "type": "command",
+          "command": "dotnet devhub telemetry send --agent cursor",
+          "timeout": 5,
+          "env": {
+            "DEVHUB_TELEMETRY_ENDPOINT": "${DEVHUB_TELEMETRY_ENDPOINT}",
+            "DEVHUB_TELEMETRY_TOKEN": "${DEVHUB_TELEMETRY_TOKEN}",
+            "DEVHUB_TELEMETRY_SALT": "${DEVHUB_TELEMETRY_SALT}"
+          }
+        }
+      ]
+    }
+  },
+  "codexcli": {
+    "hooks": {
+      "postToolUse": [
+        {
+          "matcher": ".*",
+          "type": "command",
+          "command": "dotnet devhub telemetry send --agent codexcli",
+          "timeout": 5,
+          "env": {
+            "DEVHUB_TELEMETRY_ENDPOINT": "${DEVHUB_TELEMETRY_ENDPOINT}",
+            "DEVHUB_TELEMETRY_TOKEN": "${DEVHUB_TELEMETRY_TOKEN}",
+            "DEVHUB_TELEMETRY_SALT": "${DEVHUB_TELEMETRY_SALT}"
+          }
+        }
+      ]
+    }
+  }
+}
