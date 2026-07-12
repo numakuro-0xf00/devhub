@@ -194,6 +194,32 @@
         "mode": "markdown",
         "content": "**Copilot は本ダッシュボードの対象外です。**\n\nGitHub の公式仕様上、Copilot は *設定単位*(skill / subagent / MCP 等)の利用データ取得が不可能です。取得できるのは Billing Seats API の `last_activity_at` による「利用有無」のみです(設定単位の内訳は取れません)。\n\n詳細: `doc/requirements.md` FR-4.4 / D-5、`doc/phase2.md` D-P2-8。"
       }
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "skill 別利用回数(Claude Code トランスクリプト事後解析)",
+      "description": "sum by (tool_name) (devhub_tool_use_total{event=\"skill_use\"}) — hooks では取得できない skill 利用を devhub telemetry scan-transcripts が補完したもの(doc/phase2.md Step 4 / D-P2-7)。post_tool_use とは event ラベルで区別される。",
+      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+          "instant": true,
+          "expr": "sum by (tool_name) (devhub_tool_use_total{event=\"skill_use\"})",
+          "legendFormat": "{{tool_name}}"
+        }
+      ]
     }
   ]
 }

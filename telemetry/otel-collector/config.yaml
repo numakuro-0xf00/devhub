@@ -1,10 +1,10 @@
-# devhub telemetry 収集基盤 — OTel Collector 設定(doc/phase2.md Step 3)。
+# devhub telemetry 収集基盤 — OTel Collector 設定(doc/phase2.md Step 3・Step 4)。
 #
 # 全体の流れ:
-#   devhub telemetry send --agent <...>
+#   devhub telemetry send --agent <...> / devhub telemetry scan-transcripts
 #     --HTTP POST(Bearer 認証)--> webhookevent receiver (:8088/events)
 #       --> transform processor(OTTL): JSON body をパースして
-#           tool_name / agent / agent_type を属性へ昇格
+#           event / tool_name / agent / agent_type を属性へ昇格
 #             (1) count connector で devhub_tool_use_total (Counter) 化 --> prometheus exporter (:8889/metrics)
 #             (2) 生ログ(session_id / user_id を含む本文そのまま)を otlphttp exporter で Loki へ
 #
@@ -70,9 +70,12 @@ processors:
           # パースして log.cache に取り込む。JSON として解釈できる body のみ対象(IsMatch で簡易判定)。
           - merge_maps(log.cache, ParseJSON(log.body), "upsert") where IsMatch(log.body, "^\\{")
 
-          # Prometheus のメトリクスラベルに使う3属性だけを昇格する。session_id / user_id は
+          # Prometheus のメトリクスラベルに使う4属性だけを昇格する。session_id / user_id は
           # 意図的に log.attributes へ昇格しない(ラベルに出さない。doc/phase2.md「イベントスキーマ」の制約)。
           # 生イベント全文(session_id / user_id を含む)は log.body のまま Loki 側の otlphttp exporter へ流れる。
+          # event は post_tool_use(hooks 由来。devhub telemetry send)/ skill_use(トランスクリプト事後解析。
+          # devhub telemetry scan-transcripts)の区別に使う(doc/phase2.md Step 4)。
+          - set(log.attributes["event"], log.cache["event"])
           - set(log.attributes["tool_name"], log.cache["tool_name"])
           - set(log.attributes["agent"], log.cache["agent"])
           - set(log.attributes["agent_type"], log.cache["agent_type"])
@@ -91,6 +94,8 @@ connectors:
         conditions:
           - 'attributes["tool_name"] != nil'
         attributes:
+          - key: event
+            default_value: unknown
           - key: tool_name
             default_value: unknown
           - key: agent

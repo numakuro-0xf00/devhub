@@ -181,22 +181,24 @@ namespace Devhub.Tool
         }
 
         /// <summary>
-        /// devhub telemetry: hooks から呼ばれる利用状況送信(FR-4)。サブコマンドは send のみ。
+        /// devhub telemetry: hooks から呼ばれる利用状況送信(FR-4)。サブコマンドは send / scan-transcripts。
         /// telemetry 単体・未知サブコマンドは通常コマンドと同様に exit 2 でヘルプ誘導する
-        /// (「hook から呼ばれる send だけ」が <see cref="TelemetrySend"/> の沈黙契約の対象。
+        /// (「hook から呼ばれる send / scan-transcripts だけ」が沈黙契約の対象。
         /// doc/phase2.md「送信コマンド devhub telemetry send の契約と構成」)。
         /// </summary>
         private static int Telemetry(string[] args)
         {
             if (args.Length == 0)
             {
-                Console.Error.WriteLine("[devhub] telemetry: サブコマンドが必要です(send)。`devhub --help` を参照してください。");
+                Console.Error.WriteLine(
+                    "[devhub] telemetry: サブコマンドが必要です(send/scan-transcripts)。`devhub --help` を参照してください。");
                 return 2;
             }
 
             return args[0] switch
             {
                 "send" => TelemetrySend(args.Skip(1).ToArray()),
+                "scan-transcripts" => TelemetryScanTranscripts(args.Skip(1).ToArray()),
                 _ => TelemetryUnknown(args[0]),
             };
         }
@@ -346,6 +348,243 @@ namespace Devhub.Tool
             }
             return agent;
         }
+
+        /// <summary>1回の実行(devhub telemetry scan-transcripts)で送信する skill_use イベントの上限件数。</summary>
+        private const int MaxTranscriptEventsPerRun = 1000;
+
+        /// <summary>
+        /// devhub telemetry scan-transcripts: Claude Code トランスクリプト(<c>~/.claude/projects/&lt;encoded-cwd&gt;/</c>)
+        /// を増分走査し、skill 利用(hooks からは取得不可。D-P2-7)を <c>devhub telemetry send</c> と同じ
+        /// エンドポイントへ送信する(doc/phase2.md「実装仕様」Step 4)。
+        ///
+        /// telemetry send と同一の契約:常に exit 0・既定沈黙(DEVHUB_TELEMETRY_DEBUG=1 で診断)・
+        /// DEVHUB_TELEMETRY_ENDPOINT 未設定なら即 no-op。対象ディレクトリが無い場合も no-op。
+        /// 状態ファイル(<c>~/.devhub/telemetry-scan-state/&lt;encoded-cwd&gt;.json</c>)が無い(=本当の初回実行)場合は
+        /// 走査せず現在の EOF オフセットを記録するだけにする(過去分の大量送信を避ける。--backfill 指定時のみ
+        /// 全履歴を走査する)。1回の実行での送信上限は 1000 件(超過分は次回に持ち越す)。
+        /// </summary>
+        private static int TelemetryScanTranscripts(string[] args)
+        {
+            var backfill = ParseScanTranscriptsOptions(args, out var argError);
+            var osEnv = ReadOsEnvironmentSnapshot();
+            var dotEnv = ReadDotEnvSnapshotSilently(Directory.GetCurrentDirectory());
+            string? ResolveVar(string name) => TelemetryEnvVarResolver.Resolve(name, osEnv, dotEnv);
+
+            var debug = ResolveVar("DEVHUB_TELEMETRY_DEBUG") == "1";
+            void DebugLog(string message)
+            {
+                if (debug) Console.Error.WriteLine($"[devhub] telemetry scan-transcripts: {message}");
+            }
+
+            if (argError is not null)
+            {
+                DebugLog(argError);
+                return 0;
+            }
+
+            try
+            {
+                // DEVHUB_TELEMETRY_ENDPOINT 未設定ならファイルシステムに一切触れずに即終了する
+                // (D-P2-4。telemetry send と同じオフスイッチ契約)。
+                var endpoint = ResolveVar("DEVHUB_TELEMETRY_ENDPOINT");
+                if (string.IsNullOrEmpty(endpoint))
+                {
+                    DebugLog("DEVHUB_TELEMETRY_ENDPOINT が未設定のためスキャンをスキップします。");
+                    return 0;
+                }
+
+                var cwd = Directory.GetCurrentDirectory();
+                var encoded = TranscriptProjectPathEncoder.Encode(cwd);
+                var projectDir = Path.Combine(GetHomeDirectory(), ".claude", "projects", encoded);
+                if (!Directory.Exists(projectDir))
+                {
+                    DebugLog($"対象のプロジェクトディレクトリが見つかりません: {projectDir}");
+                    return 0;
+                }
+
+                var files = Directory.EnumerateFiles(projectDir, "*.jsonl", SearchOption.AllDirectories).ToArray();
+                var lengths = files.ToDictionary(f => f, f => new FileInfo(f).Length);
+
+                var stateDir = Path.Combine(GetHomeDirectory(), ".devhub", "telemetry-scan-state");
+                var statePath = Path.Combine(stateDir, $"{encoded}.json");
+                var hasPriorState = File.Exists(statePath);
+                var previousOffsets = hasPriorState ? ReadScanStateSilently(statePath) : new Dictionary<string, long>();
+
+                var plan = TranscriptScanPlanner.BuildPlan(lengths, hasPriorState, previousOffsets, backfill);
+
+                var salt = ResolveVar("DEVHUB_TELEMETRY_SALT");
+                var userSeed = ResolveVar("DEVHUB_TELEMETRY_USER_SEED") ?? Environment.UserName;
+                var timeoutMs = ParseTelemetryTimeoutMs(ResolveVar("DEVHUB_TELEMETRY_TIMEOUT_MS"));
+                var token = ResolveVar("DEVHUB_TELEMETRY_TOKEN");
+                var sender = new TelemetrySender(TimeSpan.FromMilliseconds(timeoutMs));
+
+                var newOffsets = new Dictionary<string, long>();
+                var remainingBudget = MaxTranscriptEventsPerRun;
+                var capNotified = false;
+
+                foreach (var task in plan.OrderBy(t => t.Path, StringComparer.Ordinal))
+                {
+                    if (!task.ShouldRead)
+                    {
+                        // 状態ファイル無し(本当の初回実行)。走査せず現在の EOF を記録するだけ。
+                        newOffsets[task.Path] = task.CurrentLength;
+                        continue;
+                    }
+
+                    if (remainingBudget <= 0)
+                    {
+                        // 上限到達済み。このファイルは今回一切読まず、前回までの進捗をそのまま維持して次回に回す。
+                        if (!capNotified)
+                        {
+                            DebugLog($"1回の実行での送信上限({MaxTranscriptEventsPerRun}件)に達したため、残りは次回に回します。");
+                            capNotified = true;
+                        }
+                        newOffsets[task.Path] = task.StartOffset;
+                        continue;
+                    }
+
+                    var chunk = ReadChunk(task.Path, task.StartOffset);
+                    var completeLines = TranscriptChunkParser.ParseCompleteLines(chunk);
+                    var outcome = TranscriptSkillScanner.Scan(completeLines, remainingBudget);
+
+                    var agentType = ResolveAgentType(task.Path);
+                    foreach (var record in outcome.Events)
+                    {
+                        var outbound = new TelemetryOutboundEvent(
+                            Schema: 1,
+                            Event: "skill_use",
+                            Agent: TelemetryEventNormalizer.WireName(TelemetryAgentKind.ClaudeCode),
+                            ToolName: record.SkillName,
+                            AgentType: agentType,
+                            SessionId: record.RawSessionId is not null
+                                ? TelemetryAnonymizer.Hash(salt, record.RawSessionId)
+                                : null,
+                            UserId: TelemetryAnonymizer.Hash(salt, userSeed),
+                            Timestamp: record.Timestamp ?? DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+
+                        var json = JsonSerializer.Serialize(outbound);
+                        var sent = sender.Send(endpoint, json, token);
+                        DebugLog(sent
+                            ? $"skill_use を送信しました({record.SkillName})。"
+                            : $"送信に失敗しました(無視します): {record.SkillName}");
+                    }
+
+                    remainingBudget -= outcome.Events.Count;
+                    newOffsets[task.Path] = task.StartOffset + outcome.ConsumedBytes;
+                }
+
+                WriteScanStateSilently(statePath, newOffsets);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                // 契約上、このコマンドもどんな異常があっても hook の動作をブロックしてはならない。
+                DebugLog($"予期しないエラーを無視します: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// scan-transcripts の引数から --backfill を取り出す。--backfill 以外の未知オプションは
+        /// error に日本語メッセージを設定して呼び出し元へ返す(telemetry send の ParseAgentOption と同じ流儀。
+        /// 呼び出し元は debug 時のみ stderr へ出し契約どおり exit 0 を維持する)。
+        /// </summary>
+        private static bool ParseScanTranscriptsOptions(string[] args, out string? error)
+        {
+            error = null;
+            var backfill = false;
+            foreach (var arg in args)
+            {
+                if (arg == "--backfill")
+                {
+                    backfill = true;
+                }
+                else
+                {
+                    error = $"未知のオプション: {arg}";
+                    return false;
+                }
+            }
+            return backfill;
+        }
+
+        /// <summary>
+        /// ファイルの <paramref name="startOffset"/> から EOF までを読み取る薄い IO ラッパー。
+        /// FileShare.ReadWrite を指定し、Claude Code が書き込み中でも読み取れるようにする(追記専用ファイル)。
+        /// </summary>
+        private static byte[] ReadChunk(string path, long startOffset)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            stream.Seek(startOffset, SeekOrigin.Begin);
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return buffer.ToArray();
+        }
+
+        /// <summary>
+        /// subagent 別トランスクリプトなら sibling の meta.json から agentType を読む薄い IO ラッパー
+        /// (<see cref="TranscriptAgentTypeResolver"/>)。メインのセッション transcript は常に null。
+        /// メタファイルが無い・読み取れない場合も null(致命的ではないため沈黙して無視)。
+        /// </summary>
+        private static string? ResolveAgentType(string jsonlPath)
+        {
+            if (!TranscriptAgentTypeResolver.IsSubagentFile(jsonlPath)) return null;
+
+            var metaPath = TranscriptAgentTypeResolver.GetMetaFilePath(jsonlPath);
+            if (!File.Exists(metaPath)) return null;
+
+            try
+            {
+                return TranscriptAgentTypeResolver.ExtractAgentType(File.ReadAllText(metaPath));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// scan-transcripts の状態ファイル(path→offset の JSON)を読み取る。存在しない・パース不能な場合は
+        /// 空の辞書を返す(沈黙契約。呼び出し側で hasPriorState の有無と組み合わせて解釈する)。
+        /// </summary>
+        private static IReadOnlyDictionary<string, long> ReadScanStateSilently(string statePath)
+        {
+            try
+            {
+                var text = File.ReadAllText(statePath);
+                var parsed = JsonSerializer.Deserialize<Dictionary<string, long>>(text);
+                return parsed ?? new Dictionary<string, long>();
+            }
+            catch
+            {
+                return new Dictionary<string, long>();
+            }
+        }
+
+        /// <summary>scan-transcripts の状態ファイルを書き込む。失敗しても沈黙契約どおり無視する。</summary>
+        private static void WriteScanStateSilently(string statePath, IReadOnlyDictionary<string, long> state)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(statePath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(statePath, JsonSerializer.Serialize(state));
+            }
+            catch
+            {
+                // 次回もう一度差分計算が走るだけなので致命的ではない。
+            }
+        }
+
+        /// <summary>
+        /// ホームディレクトリを解決する。HOME 環境変数を優先し(E2E テストで一時ディレクトリへ差し替え可能に
+        /// するため。WSL/Linux/macOS の通常利用でも一致する)、無ければ OS 標準の解決(Windows は USERPROFILE)に
+        /// フォールバックする。
+        /// </summary>
+        private static string GetHomeDirectory() =>
+            Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } home
+                ? home
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         /// <summary>env サブコマンドの動作モード。</summary>
         private enum EnvMode
@@ -764,6 +1003,8 @@ namespace Devhub.Tool
                   devhub env [options]      .rulesync/ の ${VAR} プレースホルダから必要な環境変数を検出・案内
                   devhub telemetry send --agent <claudecode|cursor|codexcli>
                                             hook ペイロード(stdin)を正規化・匿名化して送信(常に exit 0)
+                  devhub telemetry scan-transcripts [--backfill]
+                                            Claude Code トランスクリプトを増分走査し skill 利用を送信(常に exit 0)
                   devhub --version          バージョン表示
                   devhub --help             このヘルプ
 
@@ -821,8 +1062,22 @@ namespace Devhub.Tool
                   2段フォールバックで解決する。hook プロセスの環境には .env が載らないため(devhub env --fill は
                   .env に書くのみ)、OS 環境変数が無い場合は .env を読みに行く(読み取り失敗は沈黙して無視)。
 
+                devhub telemetry scan-transcripts [--backfill]:
+                  Claude Code トランスクリプト(~/.claude/projects/<encoded-cwd>/ 配下。カレントディレクトリに
+                  対応するプロジェクトのみ)から skill 利用(hooks では取得不可な唯一の情報源)を抽出し、
+                  telemetry send と同じ DEVHUB_TELEMETRY_ENDPOINT へ送信する。sessionEnd hook からの自動起動を
+                  想定(devhub apply が配布する hooks テンプレートに含まれる)。
+
+                  send と同一の契約:常に exit 0、既定沈黙(DEVHUB_TELEMETRY_DEBUG=1 で診断)、
+                  DEVHUB_TELEMETRY_ENDPOINT 未設定・対象ディレクトリ無しは即 no-op。
+
+                  ファイル別バイトオフセットを ~/.devhub/telemetry-scan-state/<encoded-cwd>.json に記録し
+                  増分走査する。状態ファイルが無い(本当の初回実行)場合は走査せず現在の EOF を記録するだけに
+                  留める(過去分の大量送信を避ける)。--backfill を指定すると全履歴を走査する。
+                  1回の実行での送信上限は 1000 件(超過分は次回に持ち越す)。
+
                   devhub telemetry(サブコマンド省略)・未知サブコマンドは通常コマンドと同様に exit 2 で
-                  ヘルプ誘導する(沈黙・exit 0 契約の対象は hook から呼ばれる send のみ)。
+                  ヘルプ誘導する(沈黙・exit 0 契約の対象は hook から呼ばれる send / scan-transcripts のみ)。
                 """);
         }
     }

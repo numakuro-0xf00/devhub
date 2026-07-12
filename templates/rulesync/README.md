@@ -1,7 +1,8 @@
 # templates/rulesync/hooks.json
 
 Phase 2(利用状況可視化。`doc/phase2.md`)向けの hooks テンプレート。`devhub telemetry send` を
-Claude Code / Cursor / Codex CLI の `postToolUse` から呼び出す。
+Claude Code / Cursor / Codex CLI の `postToolUse` から呼び出す。Claude Code のみ、`sessionEnd` から
+`devhub telemetry scan-transcripts`(トランスクリプト事後解析による skill 利用の補完。Step 4)も呼び出す。
 
 ## 使い方
 
@@ -34,6 +35,11 @@ Claude Code / Cursor / Codex CLI の `postToolUse` から呼び出す。
   走査して `${VAR}` プレースホルダを検出する仕組み(`EnvPlaceholderScanner`)に乗せるためだけであり、
   実際の値解決は `devhub telemetry send` 側の「OS 環境変数 → リポジトリルートの `.env`」フォールバック
   (`TelemetryEnvVarResolver`)が担う。
+
+- **`sessionEnd` は claudecode オーバーライドのみ**: rulesync@9.2.0 の canonical イベント名
+  `sessionEnd` は Claude Code の `SessionEnd`(`.claude/settings.json`)へ正しく変換されることを実測済み
+  (`matcher` は不要。セッション単位イベントのため)。Cursor / Codex CLI は Step 4 の対象外(トランスクリプトが
+  無い/取得できないため)なので、この2ターゲットのブロックには追加していない。
 
 ## Codex CLI の初回信頼登録
 
