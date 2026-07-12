@@ -116,7 +116,7 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
 
 - **rulesync `type:"http"` バグ**: 警告と実出力が矛盾する(上述)。将来 rulesync が修正しても、`command` 方式は動き続けるため移行は任意。R-4(rulesync 追従性)の具体事例として記録。
 - **webhookeventreceiver は beta**(contrib)。Collector のイメージをバージョンピンし、更新時に設定互換を確認する(R-3 と同種)。なお contrib の lokiexporter は削除済みのため、Loki への出力は Loki 3.x ネイティブ OTLP 取り込み(`otlphttp` exporter → `/otlp`)を使う(実装済み)。
-- **契約テスト(`telemetry/contract-test.sh`)は docker 必須**。本設計の作業環境には docker が無く未実行(YAML/JSON/シェルの静的検証+公式ドキュメント突き合わせのみ)。**初回デプロイ時に必ず契約テストを実行して受け口〜メトリクス生成を検証すること。**
+- **契約テスト(`telemetry/contract-test.sh`)は docker 必須**。設計時の作業環境には docker が無く静的検証のみだったが、**2026-07-12 に docker 環境で実行し PASS を確認済み**(認証あり POST → `devhub_tool_use_total` の期待ラベル生成、認証なし/誤トークン POST の 401 拒否。イメージは compose の pin どおり)。収集基盤の構成を変更した際は再実行すること。
 - **Codex の信頼登録**: `devhub apply` で hooks を配布しても、各開発者が初回に `/hooks` で承認しないと動かない。オンボーディング手順に明記する。
 - **認証**: bearertokenauth の静的トークンはローテーション運用をチームで決める(ファイルベース差し替え可)。収集エンドポイントはチーム内クローズドに置く(NFR-1)。
 - **Cursor の subagent 粒度**: 固定カテゴリのみのため、カスタム subagent 別の集計は Claude Code / Codex に限られる。ダッシュボードに注記。
