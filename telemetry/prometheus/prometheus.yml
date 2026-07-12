@@ -1,0 +1,15 @@
+# devhub telemetry 収集基盤 — Prometheus 設定(doc/phase2.md Step 3)。
+# OTel Collector の prometheus exporter (otel-collector:8889/metrics) を scrape するだけの最小構成。
+#
+# 保持期間はコンテナ起動コマンド側の --storage.tsdb.retention.time で指定する(telemetry/docker-compose.yml)。
+# 「未使用検出(既定 30 日、Grafana 変数 unused_threshold_days で可変)」の PromQL が increase(...[Nd]) を
+# 参照するため、既定値より十分長く保持する(180d)。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: devhub-otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

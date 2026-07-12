@@ -1,0 +1,123 @@
+# devhub telemetry 収集基盤 — OTel Collector 設定(doc/phase2.md Step 3)。
+#
+# 全体の流れ:
+#   devhub telemetry send --agent <...>
+#     --HTTP POST(Bearer 認証)--> webhookevent receiver (:8088/events)
+#       --> transform processor(OTTL): JSON body をパースして
+#           tool_name / agent / agent_type を属性へ昇格
+#             (1) count connector で devhub_tool_use_total (Counter) 化 --> prometheus exporter (:8889/metrics)
+#             (2) 生ログ(session_id / user_id を含む本文そのまま)を otlphttp exporter で Loki へ
+#
+# 参照した公式ドキュメント:
+#   - receiver/webhookeventreceiver/README.md
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/webhookeventreceiver/README.md
+#   - receiver/webhookeventreceiver/config.go (Config が confighttp.ServerConfig を squash しており `auth` /
+#     `endpoint` 等はそちらに由来。README には `auth` の記載が薄いため config.go を直接確認した)
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/webhookeventreceiver/config.go
+#   - config/confighttp/README.md (`auth.authenticator` でレシーバーに認証拡張を接続する書式)
+#       https://github.com/open-telemetry/opentelemetry-collector/blob/main/config/confighttp/README.md
+#   - extension/bearertokenauthextension/README.md
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/extension/bearertokenauthextension/README.md
+#   - processor/transformprocessor/README.md(OTTL。ParseJSON + log.cache による body → attributes 昇格の例、
+#     UnixMilli(log.observed_time) 等の time 変換関数はここに準拠)
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/transformprocessor/README.md
+#   - pkg/ottl/contexts/ottllog/README.md(log.observed_time など log コンテキストの path 一覧)
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/pkg/ottl/contexts/ottllog/README.md
+#   - pkg/ottl/ottlfuncs/README.md(UnixMilli コンバータ関数)
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/pkg/ottl/ottlfuncs/README.md
+#   - connector/countconnector/README.md
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/connector/countconnector/README.md
+#   - exporter/prometheusexporter/README.md(add_metric_suffixes)
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/exporter/prometheusexporter/README.md
+#   - exporter/lokiexporter は 2024-07-09 (v0.131.0) に contrib から削除済み。
+#     Loki は v3 系でネイティブ OTLP ログ取り込みに対応しているため otlphttp exporter で代替する。
+#       https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/33916 (deprecate)
+#       https://grafana.com/docs/loki/latest/send-data/otel/ (endpoint: http://<loki-addr>/otlp)
+
+extensions:
+  bearertokenauth:
+    # ${env:VAR} は Collector 標準の env var 展開構文。実値は telemetry/.env(gitignore 済み)にのみ置き、
+    # 本ファイルやリポジトリのどこにも実値を書かない(NFR-1)。scheme(既定 Bearer)/header(既定 Authorization)は
+    # devhub telemetry send が送る `Authorization: Bearer <token>` とそのまま一致するため上書き不要。
+    token: ${env:DEVHUB_TELEMETRY_TOKEN}
+
+receivers:
+  webhookevent:
+    endpoint: 0.0.0.0:8088
+    path: /events
+    health_path: /health_check
+    read_timeout: 5s
+    write_timeout: 5s
+    # devhub telemetry send が送る正規化済みイベントは数百バイト程度。異常に大きい POST を弾く安全マージン。
+    max_request_body_size: 65536
+    # 認証は bearertokenauth extension に委譲する(D-P2-... 収集基盤設計。receiver 自前の required_header は
+    # 固定文字列比較でしかなく Bearer の意味論を持たないため使わない)。
+    auth:
+      authenticator: bearertokenauth
+
+processors:
+  transform/devhub:
+    # JSON として解釈できない body(想定外の POST)は無視して後続へそのまま流す(落とさない)。
+    error_mode: ignore
+    log_statements:
+      - statements:
+          # Loki の OTLP 既定ラベル許可リストに service.name が含まれる(-> label service_name)。
+          # 明示的に立てておくことで、ダッシュボードの LogQL セレクタ {service_name="devhub-telemetry"} を
+          # 安定した固定値にする(resource attribute が一つも無いと単一の無ラベルストリームになりかねない)。
+          - set(resource.attributes["service.name"], "devhub-telemetry")
+
+          # devhub telemetry send が POST する body(doc/phase2.md イベントスキーマの JSON 文字列)を
+          # パースして log.cache に取り込む。JSON として解釈できる body のみ対象(IsMatch で簡易判定)。
+          - merge_maps(log.cache, ParseJSON(log.body), "upsert") where IsMatch(log.body, "^\\{")
+
+          # Prometheus のメトリクスラベルに使う3属性だけを昇格する。session_id / user_id は
+          # 意図的に log.attributes へ昇格しない(ラベルに出さない。doc/phase2.md「イベントスキーマ」の制約)。
+          # 生イベント全文(session_id / user_id を含む)は log.body のまま Loki 側の otlphttp exporter へ流れる。
+          - set(log.attributes["tool_name"], log.cache["tool_name"])
+          - set(log.attributes["agent"], log.cache["agent"])
+          - set(log.attributes["agent_type"], log.cache["agent_type"])
+
+          # devhub_last_used_timestamp(Gauge)は Collector 内で素直に作れないため実装しない(doc/phase2.md
+          # Step 3 の逸脱事項。詳細は telemetry/README.md)。代わりに Loki 側で「ツール別の最終利用時刻」を
+          # 表現できるよう、収集時刻(observed_time)をミリ秒の log 属性として structured metadata に残す。
+          - set(log.attributes["last_used_unix_ms"], UnixMilli(log.observed_time))
+
+connectors:
+  count:
+    logs:
+      devhub_tool_use_total:
+        description: "devhub: エージェント別・ツール別の利用イベント累積カウント(doc/phase2.md メトリクススキーマ)"
+        # tool_name が付与できたログ(≒ ツール利用イベント)だけをカウントする。
+        conditions:
+          - 'attributes["tool_name"] != nil'
+        attributes:
+          - key: tool_name
+            default_value: unknown
+          - key: agent
+            default_value: unknown
+          - key: agent_type
+            default_value: none
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # メトリクス名を devhub_tool_use_total という確定した文字列そのままにしたいので、
+    # OTel→Prometheus の自動サフィックス付与(_total の二重付与や単位サフィックス)を無効化する。
+    # count connector が出す名前がそのまま公開される。
+    add_metric_suffixes: false
+
+  otlphttp/loki:
+    # Loki 3.x のネイティブ OTLP ログ取り込みエンドポイント。パスの "/v1/logs" は otlphttp exporter が
+    # endpoint に自動で付加する(Loki 公式ドキュメントの例どおり base endpoint は "/otlp" まで)。
+    endpoint: http://loki:3100/otlp
+
+service:
+  extensions: [bearertokenauth]
+  pipelines:
+    logs:
+      receivers: [webhookevent]
+      processors: [transform/devhub]
+      exporters: [count, otlphttp/loki]
+    metrics:
+      receivers: [count]
+      exporters: [prometheus]

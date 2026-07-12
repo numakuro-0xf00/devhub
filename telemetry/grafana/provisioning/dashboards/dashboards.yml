@@ -1,0 +1,17 @@
+# devhub telemetry 収集基盤 — Grafana dashboard provisioning(doc/phase2.md Step 3)。
+# telemetry/grafana/dashboards/ 配下の JSON をファイルベースで自動読み込みする。
+#
+# 参照: https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+
+apiVersion: 1
+
+providers:
+  - name: devhub
+    orgId: 1
+    folder: devhub
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

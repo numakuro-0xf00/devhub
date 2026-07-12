@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Devhub.Tool;
 
 return Cli.Run(args);
@@ -24,19 +25,25 @@ namespace Devhub.Tool
                 "check" => Check(args.Skip(1).ToArray()),
                 "secrets" => Secrets(args.Skip(1).ToArray()),
                 "env" => Env(args.Skip(1).ToArray()),
+                "telemetry" => Telemetry(args.Skip(1).ToArray()),
                 _ => Unknown(args[0]),
             };
         }
 
         /// <summary>
-        /// check の実行本体。既存の rulesync ドリフト検査の後に、秘匿情報スキャン(devhub secrets)を実行する。
-        /// ドリフト検査が非ゼロで終わればその時点で打ち切る。--no-secrets 指定時は秘匿情報スキャンをスキップする
+        /// check の実行本体。まず .rulesync/hooks.json の hooks lint(<see cref="HooksLint"/>)を rulesync
+        /// ドリフト検査より前に実行し(壊れた設定のまま rulesync に生成させないため。doc/phase2.md Step 2c)、
+        /// 続けてドリフト検査、最後に秘匿情報スキャン(devhub secrets)を実行する。
+        /// いずれかが非ゼロで終わればその時点で打ち切る。--no-secrets 指定時は秘匿情報スキャンをスキップする
         /// (apply には影響しない。スキャンは検査系コマンドのみが対象)。
         /// </summary>
         private static int Check(string[] args)
         {
             var noSecrets = args.Any(a => a == "--no-secrets");
             var remaining = args.Where(a => a != "--no-secrets").ToArray();
+
+            var lintCode = HooksLint(Directory.GetCurrentDirectory());
+            if (lintCode != 0) return lintCode;
 
             var code = Apply(remaining, check: true);
             if (code != 0) return code;
@@ -48,6 +55,40 @@ namespace Devhub.Tool
             }
 
             return Secrets(Array.Empty<string>());
+        }
+
+        /// <summary>
+        /// devhub check の一部:.rulesync/hooks.json に rulesync@9.2.0 のバグ対象である
+        /// <c>type:"http"</c> が混入していないかを検査する(<see cref="HooksLintChecker"/>。doc/phase2.md
+        /// 「リスク・注意点」)。hooks.json が存在しない場合は検査対象が無いため何もせず exit 0。
+        /// JSON パースに失敗した場合も lint 失敗にはせず、警告を表示するだけで exit 0 とする
+        /// (rulesync 自身が別途パースエラーを出すため devhub 側で二重報告しない)。
+        /// 混入を検出した場合はドリフト検査と同じ意味論で exit 1 にする。
+        /// </summary>
+        private static int HooksLint(string repoRoot)
+        {
+            var result = HooksLintChecker.CheckRepository(repoRoot);
+            if (result is null) return 0;
+
+            if (result.ParseError is not null)
+            {
+                Console.WriteLine(
+                    "[devhub] check: .rulesync/hooks.json の JSON 解析に失敗したため hooks lint をスキップします" +
+                    $"(rulesync 実行時のエラーメッセージを確認してください: {result.ParseError})。");
+                return 0;
+            }
+
+            if (!result.HasViolations) return 0;
+
+            Console.Error.WriteLine(
+                "[devhub] check: .rulesync/hooks.json に type:\"http\" のエントリが含まれています。" +
+                "rulesync@9.2.0 は Claude Code / Cursor 向けに url が欠落した壊れたエントリを生成するバグがあるため、" +
+                "devhub では type:\"command\" のみを許可します。");
+            foreach (var violation in result.Violations)
+            {
+                Console.Error.WriteLine($"[devhub]   該当エントリ: {violation.Path}");
+            }
+            return 1;
         }
 
         /// <summary>
@@ -137,6 +178,173 @@ namespace Devhub.Tool
         {
             try { File.Delete(path); }
             catch { /* 一時ファイルの削除失敗は致命的ではないためベストエフォートで無視する */ }
+        }
+
+        /// <summary>
+        /// devhub telemetry: hooks から呼ばれる利用状況送信(FR-4)。サブコマンドは send のみ。
+        /// telemetry 単体・未知サブコマンドは通常コマンドと同様に exit 2 でヘルプ誘導する
+        /// (「hook から呼ばれる send だけ」が <see cref="TelemetrySend"/> の沈黙契約の対象。
+        /// doc/phase2.md「送信コマンド devhub telemetry send の契約と構成」)。
+        /// </summary>
+        private static int Telemetry(string[] args)
+        {
+            if (args.Length == 0)
+            {
+                Console.Error.WriteLine("[devhub] telemetry: サブコマンドが必要です(send)。`devhub --help` を参照してください。");
+                return 2;
+            }
+
+            return args[0] switch
+            {
+                "send" => TelemetrySend(args.Skip(1).ToArray()),
+                _ => TelemetryUnknown(args[0]),
+            };
+        }
+
+        private static int TelemetryUnknown(string cmd)
+        {
+            Console.Error.WriteLine($"[devhub] telemetry: 未知のサブコマンド: {cmd}");
+            return 2;
+        }
+
+        private const int DefaultTelemetryTimeoutMs = 1000;
+
+        /// <summary>
+        /// devhub telemetry send: hook ペイロード(stdin)を正規化・匿名化して DEVHUB_TELEMETRY_ENDPOINT へ POST する。
+        ///
+        /// hook から同期実行される(Claude Code の PostToolUse 等はツール応答をブロックする)ため、以下を
+        /// 契約として固定する(doc/phase2.md 該当節):
+        ///   - 常に exit 0 で終了する(引数エラー・未知 --agent・パース失敗・送信失敗を含め、例外は一切伝播させない)。
+        ///   - 既定では stdout / stderr に何も出力しない(沈黙の原則)。診断は DEVHUB_TELEMETRY_DEBUG=1 のときだけ stderr へ。
+        ///   - DEVHUB_TELEMETRY_ENDPOINT が未設定なら stdin も読まず即 exit 0(D-P2-4 の off スイッチ)。
+        ///
+        /// DEVHUB_TELEMETRY_* の環境変数は「OS 環境変数 → リポジトリルート(カレントディレクトリ)の .env」の
+        /// 2段フォールバックで解決する(<see cref="TelemetryEnvVarResolver"/>)。hook プロセスの環境には
+        /// .env が載らない(devhub env --fill は .env に書くのみ)ための穴埋め。
+        /// </summary>
+        private static int TelemetrySend(string[] args)
+        {
+            // hook プロセスの環境には .env が載らない(devhub env --fill は .env に書き込むだけで OS 環境変数は
+            // 変更しない)ため、DEVHUB_TELEMETRY_* は「OS 環境変数 → リポジトリルート(カレントディレクトリ)の
+            // .env」の2段フォールバックで解決する(TelemetryEnvVarResolver。純粋関数)。
+            // .env の読み取り失敗(存在しない・権限エラー等)は沈黙契約どおり無視する
+            // (ReadDotEnvSnapshotSilently が例外を飲み込む)。
+            var osEnv = ReadOsEnvironmentSnapshot();
+            var dotEnv = ReadDotEnvSnapshotSilently(Directory.GetCurrentDirectory());
+            string? ResolveVar(string name) => TelemetryEnvVarResolver.Resolve(name, osEnv, dotEnv);
+
+            var debug = ResolveVar("DEVHUB_TELEMETRY_DEBUG") == "1";
+            void DebugLog(string message)
+            {
+                if (debug) Console.Error.WriteLine($"[devhub] telemetry send: {message}");
+            }
+
+            try
+            {
+                // DEVHUB_TELEMETRY_ENDPOINT 未設定なら、--agent の妥当性やペイロードを見るまでもなく
+                // stdin すら読まずに即終了する(D-P2-4。テレメトリを使わないメンバー/チームには何も起きない)。
+                var endpoint = ResolveVar("DEVHUB_TELEMETRY_ENDPOINT");
+                if (string.IsNullOrEmpty(endpoint))
+                {
+                    DebugLog("DEVHUB_TELEMETRY_ENDPOINT が未設定のため送信をスキップします。");
+                    return 0;
+                }
+
+                var agentRaw = ParseAgentOption(args, out var argError);
+                if (argError is not null)
+                {
+                    DebugLog(argError);
+                    return 0;
+                }
+
+                if (agentRaw is null || !Enum.TryParse<TelemetryAgentKind>(agentRaw, ignoreCase: true, out var agent))
+                {
+                    DebugLog($"--agent が不明または未指定です: {agentRaw ?? "(未指定)"}");
+                    return 0;
+                }
+
+                var payload = Console.In.ReadToEnd();
+                var normalized = TelemetryEventNormalizer.Normalize(agent, payload);
+                if (normalized is null)
+                {
+                    DebugLog("hook ペイロードの正規化に失敗しました(JSON として解釈できないか、オブジェクトではありません)。");
+                    return 0;
+                }
+
+                var salt = ResolveVar("DEVHUB_TELEMETRY_SALT");
+                if (string.IsNullOrEmpty(salt))
+                {
+                    DebugLog("DEVHUB_TELEMETRY_SALT が未設定です。空キーで HMAC を計算します(可用性優先)。");
+                }
+
+                // user_id のハッシュ元の優先順位:
+                //   1. DEVHUB_TELEMETRY_USER_SEED (明示上書き。WSL/Windows 混在環境で一致させたい場合の手段)
+                //   2. normalized.RawUserSeed (Cursor の user_email。エージェントが自ら渡してくる識別子)
+                //   3. Environment.UserName (既定のフォールバック)
+                var userSeed = ResolveVar("DEVHUB_TELEMETRY_USER_SEED")
+                    ?? normalized.RawUserSeed
+                    ?? Environment.UserName;
+
+                var outbound = new TelemetryOutboundEvent(
+                    Schema: 1,
+                    Event: normalized.Event,
+                    Agent: normalized.Agent,
+                    ToolName: normalized.ToolName,
+                    AgentType: normalized.AgentType,
+                    SessionId: normalized.RawSessionId is not null
+                        ? TelemetryAnonymizer.Hash(salt, normalized.RawSessionId)
+                        : null,
+                    UserId: TelemetryAnonymizer.Hash(salt, userSeed),
+                    Timestamp: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+
+                var json = JsonSerializer.Serialize(outbound);
+
+                var timeoutMs = ParseTelemetryTimeoutMs(ResolveVar("DEVHUB_TELEMETRY_TIMEOUT_MS"));
+                var token = ResolveVar("DEVHUB_TELEMETRY_TOKEN");
+
+                var sender = new TelemetrySender(TimeSpan.FromMilliseconds(timeoutMs));
+                var sent = sender.Send(endpoint, json, token);
+                DebugLog(sent ? "送信しました。" : "送信に失敗しました(無視します)。");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                // 契約上、送信コマンドはどんな異常があっても hook の動作をブロックしてはならない。
+                DebugLog($"予期しないエラーを無視します: {ex.Message}");
+                return 0;
+            }
+        }
+
+        private static int ParseTelemetryTimeoutMs(string? raw) =>
+            int.TryParse(raw, out var ms) && ms > 0 ? ms : DefaultTelemetryTimeoutMs;
+
+        /// <summary>
+        /// telemetry send の引数から --agent の値を取り出す。--agent 以外の未知オプション・値欠落は
+        /// すべて error に日本語メッセージを設定して呼び出し元へ返す(呼び出し元は debug 時のみ stderr へ出し
+        /// 契約どおり exit 0 を維持する。通常コマンドの引数エラー(exit 2)とは異なる)。
+        /// </summary>
+        private static string? ParseAgentOption(string[] args, out string? error)
+        {
+            error = null;
+            string? agent = null;
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--agent")
+                {
+                    if (++i >= args.Length)
+                    {
+                        error = "--agent に値がありません。";
+                        return null;
+                    }
+                    agent = args[i];
+                }
+                else
+                {
+                    error = $"未知のオプション: {args[i]}";
+                    return null;
+                }
+            }
+            return agent;
         }
 
         /// <summary>env サブコマンドの動作モード。</summary>
@@ -381,6 +589,23 @@ namespace Devhub.Tool
         }
 
         /// <summary>
+        /// telemetry send 専用の .env 読み取り。<see cref="ReadDotEnvSnapshot"/> と異なり、読み取り失敗
+        /// (権限エラー等の予期しない IO 例外)を沈黙契約どおり無視して空の辞書を返す
+        /// (hook から同期実行される telemetry send は、常に exit 0 で hook 本体の動作をブロックしてはならない)。
+        /// </summary>
+        private static IReadOnlyDictionary<string, string> ReadDotEnvSnapshotSilently(string repoRoot)
+        {
+            try
+            {
+                return ReadDotEnvSnapshot(repoRoot);
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+        }
+
+        /// <summary>
         /// apply / check の共通処理。計画(RulesyncPlanner)を立て、各パスを rulesync に流す。
         /// いずれかのパスが非ゼロで終わればその時点で打ち切り、そのコードを返す。
         /// </summary>
@@ -534,9 +759,11 @@ namespace Devhub.Tool
 
                 使い方:
                   devhub apply [options]    単一ソース(.rulesync/)から各エージェント設定を生成
-                  devhub check [options]    生成物がソースと一致するか検査(ドリフト時 exit 1) + 秘匿情報スキャン
+                  devhub check [options]    hooks lint + 生成物がソースと一致するか検査(ドリフト時 exit 1) + 秘匿情報スキャン
                   devhub secrets            設定ソース・生成物に秘匿情報の実値が混入していないか検査(検出時 exit 1)
                   devhub env [options]      .rulesync/ の ${VAR} プレースホルダから必要な環境変数を検出・案内
+                  devhub telemetry send --agent <claudecode|cursor|codexcli>
+                                            hook ペイロード(stdin)を正規化・匿名化して送信(常に exit 0)
                   devhub --version          バージョン表示
                   devhub --help             このヘルプ
 
@@ -555,10 +782,15 @@ namespace Devhub.Tool
                 --features を省略した既定実行時は、.rulesync/ に実在する機能だけへ自動的に絞り込みます
                 (--features を明示指定した場合は絞り込みません)。
 
+                hooks lint(check の一部):.rulesync/hooks.json に type:"http" が混入していないか検査する
+                (rulesync@9.2.0 が url 欠落の壊れたエントリを生成するバグの回避。devhub では type:"command" のみ許可)。
+                hooks.json が無ければスキップし、JSON パース不能な場合は警告表示のみで exit 0(rulesync 側の
+                エラーと二重報告しない)。混入を検出した場合はドリフト検査より前に exit 1 で打ち切る。
+
                 秘匿情報スキャン(devhub secrets / check の一部):secretlint に委譲し(NFR-7)、
                 リポジトリの .secretlintrc.json があればそれを、無ければ devhub 内蔵の既定設定
                 (preset-recommend)を使う。対象は .rulesync/ AGENTS.md CLAUDE.md .claude/ .cursor/
-                .codex/ .github/ .mcp.json .agents/ のうち実在するもの。
+                .codex/ .github/ .mcp.json .agents/ telemetry/ のうち実在するもの。
 
                 devhub env(フラグは併用不可。指定しなければ一覧表示):
                   devhub env                必要な環境変数を一覧表示(設定済み/未設定。常に exit 0)
@@ -569,6 +801,28 @@ namespace Devhub.Tool
                 devhub env は .rulesync/ 配下のテキストファイルから ${VAR} 形式のプレースホルダを抽出し、
                 OS 環境変数または .env(リポジトリルート、gitignore 済み)に非空値があれば「設定済み」と判定する。
                 値そのものは表示・ログに出さない(NFR-1)。実値は .env か OS 環境変数に置き、設定ファイルに書かないこと。
+
+                devhub telemetry send --agent <claudecode|cursor|codexcli>:
+                  hooks(type: command)から呼ばれる想定の送信コマンド。stdin の hook ペイロード JSON を
+                  正規化・匿名化(HMAC-SHA256 擬似ID化)し、DEVHUB_TELEMETRY_ENDPOINT へ HTTP POST する。
+                  hook 本体の動作を絶対にブロックしないため、常に exit 0 で終了し、既定では stdout/stderr に
+                  何も出力しない(沈黙の原則)。DEVHUB_TELEMETRY_DEBUG=1 のときだけ診断を stderr に出す。
+                  DEVHUB_TELEMETRY_ENDPOINT が未設定なら stdin も読まず即 exit 0(オフスイッチ。NFR-5)。
+
+                  環境変数:
+                    DEVHUB_TELEMETRY_ENDPOINT   送信先 URL(未設定なら no-op)
+                    DEVHUB_TELEMETRY_TOKEN      Authorization: Bearer ヘッダ(設定時のみ付与)
+                    DEVHUB_TELEMETRY_SALT       HMAC-SHA256 の鍵(未設定時は空キーで計算。可用性優先)
+                    DEVHUB_TELEMETRY_USER_SEED  user_id のハッシュ元を明示上書き(既定は OS ユーザー名)
+                    DEVHUB_TELEMETRY_TIMEOUT_MS HTTP POST のタイムアウト ms(既定 1000)
+                    DEVHUB_TELEMETRY_DEBUG      1 を指定すると診断メッセージを stderr に出力
+
+                  上記の環境変数はいずれも「OS 環境変数 → リポジトリルート(カレントディレクトリ)の .env」の
+                  2段フォールバックで解決する。hook プロセスの環境には .env が載らないため(devhub env --fill は
+                  .env に書くのみ)、OS 環境変数が無い場合は .env を読みに行く(読み取り失敗は沈黙して無視)。
+
+                  devhub telemetry(サブコマンド省略)・未知サブコマンドは通常コマンドと同様に exit 2 で
+                  ヘルプ誘導する(沈黙・exit 0 契約の対象は hook から呼ばれる send のみ)。
                 """);
         }
     }

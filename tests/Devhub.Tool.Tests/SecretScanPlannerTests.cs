@@ -15,7 +15,8 @@ public class SecretScanPlannerTests
         HasCodexDir: true,
         HasGithubDir: true,
         HasMcpJson: true,
-        HasAgentsDir: true);
+        HasAgentsDir: true,
+        HasTelemetryDir: true);
 
     // 何も実在しないスナップショット。
     private static SecretScanTargetSnapshot NonePresent() => new(
@@ -27,7 +28,8 @@ public class SecretScanPlannerTests
         HasCodexDir: false,
         HasGithubDir: false,
         HasMcpJson: false,
-        HasAgentsDir: false);
+        HasAgentsDir: false,
+        HasTelemetryDir: false);
 
     [Fact]
     public void 全候補が実在するスナップショットからは全対象を決まった順序で返す()
@@ -35,7 +37,7 @@ public class SecretScanPlannerTests
         var targets = SecretScanPlanner.BuildScanTargets(AllPresent());
 
         Assert.Equal(
-            new[] { ".rulesync", "AGENTS.md", "CLAUDE.md", ".claude", ".cursor", ".codex", ".github", ".mcp.json", ".agents" },
+            new[] { ".rulesync", "AGENTS.md", "CLAUDE.md", ".claude", ".cursor", ".codex", ".github", ".mcp.json", ".agents", "telemetry" },
             targets);
     }
 
@@ -58,6 +60,16 @@ public class SecretScanPlannerTests
     }
 
     [Fact]
+    public void telemetryディレクトリが実在する場合は末尾の対象として加わる()
+    {
+        var snapshot = NonePresent() with { HasAgentsMd = true, HasTelemetryDir = true };
+
+        var targets = SecretScanPlanner.BuildScanTargets(snapshot);
+
+        Assert.Equal(new[] { "AGENTS.md", "telemetry" }, targets);
+    }
+
+    [Fact]
     public void ReadSnapshotは実ファイルシステムのファイルとディレクトリの実在を反映する()
     {
         var root = Path.Combine(Path.GetTempPath(), "devhub-secrets-test-" + Guid.NewGuid());
@@ -68,10 +80,11 @@ public class SecretScanPlannerTests
             File.WriteAllText(Path.Combine(root, "AGENTS.md"), "# agents");
             File.WriteAllText(Path.Combine(root, ".mcp.json"), "{}");
 
-            // ディレクトリ系: .claude/ だけ実在させる(中身が空でも実在扱いでよい。rulesync 側の
+            // ディレクトリ系: .claude/ と telemetry/ だけ実在させる(中身が空でも実在扱いでよい。rulesync 側の
             // 「非空でなければ実在扱いしない」制約とは異なり、秘匿情報スキャンでは空ディレクトリを
             // スキャン対象に含めても実害が無いため単純にディレクトリの実在有無だけを見る)。
             Directory.CreateDirectory(Path.Combine(root, ".claude"));
+            Directory.CreateDirectory(Path.Combine(root, "telemetry"));
 
             var snapshot = SecretScanPlanner.ReadSnapshot(root);
 
@@ -84,9 +97,10 @@ public class SecretScanPlannerTests
             Assert.False(snapshot.HasGithubDir);
             Assert.True(snapshot.HasMcpJson);
             Assert.False(snapshot.HasAgentsDir);
+            Assert.True(snapshot.HasTelemetryDir);
 
             var targets = SecretScanPlanner.BuildScanTargets(snapshot);
-            Assert.Equal(new[] { "AGENTS.md", ".claude", ".mcp.json" }, targets);
+            Assert.Equal(new[] { "AGENTS.md", ".claude", ".mcp.json", "telemetry" }, targets);
         }
         finally
         {

@@ -14,7 +14,8 @@ public sealed record SecretScanTargetSnapshot(
     bool HasCodexDir,
     bool HasGithubDir,
     bool HasMcpJson,
-    bool HasAgentsDir);
+    bool HasAgentsDir,
+    bool HasTelemetryDir);
 
 /// <summary>
 /// secretlint の 1 回分の呼び出し(設定・ignore ファイル・対象パスの組)。
@@ -73,6 +74,9 @@ public static class SecretScanPlanner
         if (snapshot.HasGithubDir) targets.Add(".github");
         if (snapshot.HasMcpJson) targets.Add(".mcp.json");
         if (snapshot.HasAgentsDir) targets.Add(".agents");
+        // telemetry/ は Step 3 の収集側インフラ(docker-compose・Collector 設定)の置き場所。
+        // トークン等の秘匿情報の実値混入を CI で機械検出するためスキャン対象に加える(doc/phase2.md Step 3)。
+        if (snapshot.HasTelemetryDir) targets.Add("telemetry");
         return targets;
     }
 
@@ -98,6 +102,7 @@ public static class SecretScanPlanner
             HasCodexDir: Exists(".codex"),
             HasGithubDir: Exists(".github"),
             HasMcpJson: Exists(".mcp.json"),
-            HasAgentsDir: Exists(".agents"));
+            HasAgentsDir: Exists(".agents"),
+            HasTelemetryDir: Exists("telemetry"));
     }
 }

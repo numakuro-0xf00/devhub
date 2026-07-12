@@ -1,0 +1,199 @@
+{
+  "id": null,
+  "uid": "devhub-telemetry",
+  "title": "devhub telemetry — 利用状況可視化",
+  "description": "doc/phase2.md (Phase 2 / FR-4) の収集基盤ダッシュボード。devhub_tool_use_total(Prometheus)と生イベント(Loki)を参照。",
+  "tags": ["devhub", "telemetry"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "unused_threshold_days",
+        "type": "textbox",
+        "label": "未使用判定の閾値(日)",
+        "description": "この日数以上利用がないツールを「未使用」として下のテーブルに表示する(doc/phase2.md D-P2-6。削除は自動実行せず提案にとどめる)",
+        "query": "30",
+        "current": {
+          "text": "30",
+          "value": "30"
+        },
+        "options": [
+          {
+            "text": "30",
+            "value": "30",
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "ツール別利用回数(時系列)",
+      "description": "sum by (tool_name) (increase(devhub_tool_use_total[$__interval]))",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+          "expr": "sum by (tool_name) (increase(devhub_tool_use_total[$__interval]))",
+          "legendFormat": "{{tool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "ツール別 合計利用回数",
+      "description": "sum by (tool_name) (devhub_tool_use_total) — Collector 起動以降の累積値",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+          "instant": true,
+          "expr": "sum by (tool_name) (devhub_tool_use_total)",
+          "legendFormat": "{{tool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "piechart",
+      "title": "agent 別内訳",
+      "description": "sum by (agent) (devhub_tool_use_total)",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "displayLabels": ["name"]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+          "instant": true,
+          "expr": "sum by (agent) (devhub_tool_use_total)",
+          "legendFormat": "{{agent}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "最終利用日時(ツール別、Loki)",
+      "description": "devhub_last_used_timestamp ゲージは Collector 内で素直に作れなかったため(doc/phase2.md Step 3 の逸脱。telemetry/README.md 参照)、Loki の last_over_time + unwrap で代替。last_used_unix_ms は Collector が受信した時刻(observed_time)。",
+      "gridPos": { "x": 8, "y": 8, "w": 16, "h": 9 },
+      "datasource": { "type": "loki", "uid": "devhub-loki" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "unit", "value": "dateTimeAsIso" },
+              { "id": "displayName", "value": "最終利用日時" }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "最終利用日時", "desc": true }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "devhub-loki" },
+          "queryType": "instant",
+          "expr": "max by (tool_name, agent) (last_over_time({service_name=\"devhub-telemetry\"} | tool_name != \"\" | unwrap last_used_unix_ms [$__range]))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "未使用検出(閾値: ${unused_threshold_days} 日)",
+      "description": "increase(devhub_tool_use_total[${unused_threshold_days}d]) == 0 のツールを一覧表示。削除は自動実行せず、人間の判断への提案にとどめる(FR-4.3 / D-P2-6)。",
+      "gridPos": { "x": 0, "y": 17, "w": 16, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "none" },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [{ "id": "displayName", "value": "累積利用回数(参考)" }]
+          }
+        ]
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "devhub-prometheus" },
+          "instant": true,
+          "format": "table",
+          "expr": "sum by (tool_name, agent) (devhub_tool_use_total) and on (tool_name, agent) (sum by (tool_name, agent) (increase(devhub_tool_use_total[${unused_threshold_days}d])) == 0)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "title": "制約の注記: GitHub Copilot",
+      "gridPos": { "x": 16, "y": 17, "w": 8, "h": 8 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Copilot は本ダッシュボードの対象外です。**\n\nGitHub の公式仕様上、Copilot は *設定単位*(skill / subagent / MCP 等)の利用データ取得が不可能です。取得できるのは Billing Seats API の `last_activity_at` による「利用有無」のみです(設定単位の内訳は取れません)。\n\n詳細: `doc/requirements.md` FR-4.4 / D-5、`doc/phase2.md` D-P2-8。"
+      }
+    }
+  ]
+}
