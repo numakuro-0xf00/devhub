@@ -107,7 +107,10 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
    - **増分走査**: ファイル別バイトオフセットを `~/.devhub/telemetry-scan-state/<encoded-cwd>.json` に記録(トランスクリプトは追記専用であることを実証済み)。書き込み途中の末尾不完全行は据え置き。**初回は EOF を記録するのみで過去分を送らない**(`--backfill` で全履歴をオプトイン)。1回の実行で最大 1000 件。
    - **起動トリガー**: hooks テンプレートの claudecode オーバーライドに `sessionEnd` で統合(rulesync@9.2.0 で `SessionEnd` へ変換されることを実測)。`send` と同じ no-op スイッチ・沈黙契約。
    - **制約**: Prometheus のカウントは取り込み時刻で計上される(count connector の性質)。イベントの原時刻は Loki の本文にのみ保持されるため、`--backfill` した過去分はメトリクス上「実行時点の利用」として見える。
-7. **Step 5 — Copilot(任意)**: Billing Seats API の `last_activity_at` による利用有無の取り込み。優先度低。
+7. **Step 5 — Copilot(実装済み)**: `devhub telemetry copilot-seats` が GitHub Copilot Billing Seats API(`GET /orgs/{org}/copilot/billing/seats`、要 `manage_billing:copilot` か `read:org` の org オーナー権限)から `last_activity_at` を取得し、`event: "copilot_activity"` で送信する(FR-4.4 のとおり**利用有無まで**。設定単位の内訳は取得不可)。
+   - **管理者向けコマンド**(チーム内の1箇所で定期実行する想定)であり、hook 契約は適用しない: 設定不足は exit 2、GitHub API 失敗は exit 1 の明示エラー。
+   - 必要な設定: `DEVHUB_TELEMETRY_COPILOT_ORG` / `DEVHUB_TELEMETRY_COPILOT_TOKEN`(+既存の ENDPOINT/SALT。GHES 向けに `DEVHUB_TELEMETRY_COPILOT_API_BASE_URL` で API ベース URL を上書き可)。いずれも OS env → `.env` の2段解決。
+   - **差分送信**: `~/.devhub/telemetry-copilot-state/<org>.json` に送信済み `last_activity_at` を記録し、変化したユーザー分のみ送信(定期実行での重複防止)。送信失敗時は状態を戻して次回再送。ログイン名は HMAC 擬似ID化し、`agent_type` には `last_activity_editor` の先頭セグメント(例 vscode)を載せる。`last_activity_at` が null(未利用)の seat は送らない。
 
 ## リスク・注意点
 
