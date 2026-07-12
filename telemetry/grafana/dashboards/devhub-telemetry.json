@@ -220,6 +220,47 @@
           "legendFormat": "{{tool_name}}"
         }
       ]
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Copilot 利用有無(ユーザー別最終アクティビティ、Loki)",
+      "description": "devhub telemetry copilot-seats が GitHub Copilot Billing Seats API から取り込んだ event=\"copilot_activity\" を Loki の last_over_time + unwrap で表示。取得できるのは「利用有無」(last_activity_at)のみで、skill/subagent/MCP 等の設定単位の内訳は公式に取得不可(FR-4.4 / D-P2-8。右のパネル参照)。user_id は HMAC-SHA256 による擬似ID(NFR-2)。",
+      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "devhub-loki" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "unit", "value": "dateTimeAsIso" },
+              { "id": "displayName", "value": "最終アクティビティ日時" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "user_id" },
+            "properties": [
+              { "id": "displayName", "value": "user_id(擬似ID)" }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true } } }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "最終アクティビティ日時", "desc": true }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "devhub-loki" },
+          "queryType": "instant",
+          "expr": "max by (user_id) (last_over_time({service_name=\"devhub-telemetry\"} | event=\"copilot_activity\" | json | unwrap last_used_unix_ms [$__range]))"
+        }
+      ]
     }
   ]
 }

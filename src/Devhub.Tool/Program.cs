@@ -181,17 +181,19 @@ namespace Devhub.Tool
         }
 
         /// <summary>
-        /// devhub telemetry: hooks から呼ばれる利用状況送信(FR-4)。サブコマンドは send / scan-transcripts。
-        /// telemetry 単体・未知サブコマンドは通常コマンドと同様に exit 2 でヘルプ誘導する
-        /// (「hook から呼ばれる send / scan-transcripts だけ」が沈黙契約の対象。
-        /// doc/phase2.md「送信コマンド devhub telemetry send の契約と構成」)。
+        /// devhub telemetry: hooks から呼ばれる利用状況送信(FR-4)。サブコマンドは send / scan-transcripts /
+        /// copilot-seats。telemetry 単体・未知サブコマンドは通常コマンドと同様に exit 2 でヘルプ誘導する
+        /// (「hook から呼ばれる send / scan-transcripts だけ」が沈黙契約の対象。copilot-seats は管理者が
+        /// 手動実行する想定のコマンドであり、この沈黙契約の対象外。doc/phase2.md「送信コマンド devhub
+        /// telemetry send の契約と構成」/ Step 5)。
         /// </summary>
         private static int Telemetry(string[] args)
         {
             if (args.Length == 0)
             {
                 Console.Error.WriteLine(
-                    "[devhub] telemetry: サブコマンドが必要です(send/scan-transcripts)。`devhub --help` を参照してください。");
+                    "[devhub] telemetry: サブコマンドが必要です(send/scan-transcripts/copilot-seats)。" +
+                    "`devhub --help` を参照してください。");
                 return 2;
             }
 
@@ -199,6 +201,7 @@ namespace Devhub.Tool
             {
                 "send" => TelemetrySend(args.Skip(1).ToArray()),
                 "scan-transcripts" => TelemetryScanTranscripts(args.Skip(1).ToArray()),
+                "copilot-seats" => TelemetryCopilotSeats(args.Skip(1).ToArray()),
                 _ => TelemetryUnknown(args[0]),
             };
         }
@@ -563,6 +566,162 @@ namespace Devhub.Tool
 
         /// <summary>scan-transcripts の状態ファイルを書き込む。失敗しても沈黙契約どおり無視する。</summary>
         private static void WriteScanStateSilently(string statePath, IReadOnlyDictionary<string, long> state)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(statePath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(statePath, JsonSerializer.Serialize(state));
+            }
+            catch
+            {
+                // 次回もう一度差分計算が走るだけなので致命的ではない。
+            }
+        }
+
+        /// <summary>
+        /// devhub telemetry copilot-seats: GitHub Copilot Billing Seats API から seat 一覧を取得し、
+        /// 「利用有無」(last_activity_at)を copilot_activity イベントとして送信する(D-P2-8 / FR-4.4。
+        /// 設定単位の可視化は公式に不可能なため、取得できるのはこれだけ)。
+        ///
+        /// このコマンドは管理者向けであり、hook から呼ばれる send / scan-transcripts の沈黙契約
+        /// (常に exit 0)は適用しない:
+        ///   - 必要な設定(下記環境変数)が不足していれば日本語エラーを表示して exit 2。
+        ///   - GitHub API 呼び出しに失敗すれば exit 1。
+        ///   - 成功時は exit 0 で送信件数を表示する(devhub secrets / devhub env と同じ表示トーン)。
+        ///
+        /// 必要な環境変数(いずれも DEVHUB_TELEMETRY_ENDPOINT 等と同じ「OS 環境変数 → .env」の2段解決):
+        ///   DEVHUB_TELEMETRY_ENDPOINT       送信先(telemetry send と共通)
+        ///   DEVHUB_TELEMETRY_COPILOT_ORG    GitHub organization スラッグ
+        ///   DEVHUB_TELEMETRY_COPILOT_TOKEN  GitHub API 呼び出し用トークン(生値をログ・stdout に出さない)
+        ///   DEVHUB_TELEMETRY_SALT           HMAC 鍵(telemetry send と共通。未設定時は空キーで可用性優先)
+        ///
+        /// 差分送信: 状態ファイル ~/.devhub/telemetry-copilot-state/&lt;org&gt;.json(user_id(HMAC後) →
+        /// 送信済み last_activity_at)と比較し、前回と同じ last_activity_at のユーザーはスキップする
+        /// (定期実行での重複防止。<see cref="CopilotSeatDiffPlanner"/>)。送信に失敗した seat は状態を
+        /// 前回値のまま(または新規ユーザーなら未記録のまま)残し、次回再送されるようにする。
+        /// </summary>
+        private static int TelemetryCopilotSeats(string[] args)
+        {
+            if (args.Length > 0)
+            {
+                Console.Error.WriteLine($"[devhub] telemetry copilot-seats: 未知のオプション: {args[0]}");
+                return 2;
+            }
+
+            var osEnv = ReadOsEnvironmentSnapshot();
+            var dotEnv = ReadDotEnvSnapshotSilently(Directory.GetCurrentDirectory());
+            string? ResolveVar(string name) => TelemetryEnvVarResolver.Resolve(name, osEnv, dotEnv);
+
+            var endpoint = ResolveVar("DEVHUB_TELEMETRY_ENDPOINT");
+            var org = ResolveVar("DEVHUB_TELEMETRY_COPILOT_ORG");
+            var token = ResolveVar("DEVHUB_TELEMETRY_COPILOT_TOKEN");
+
+            var missing = new List<string>();
+            if (string.IsNullOrEmpty(endpoint)) missing.Add("DEVHUB_TELEMETRY_ENDPOINT");
+            if (string.IsNullOrEmpty(org)) missing.Add("DEVHUB_TELEMETRY_COPILOT_ORG");
+            if (string.IsNullOrEmpty(token)) missing.Add("DEVHUB_TELEMETRY_COPILOT_TOKEN");
+
+            if (missing.Count > 0)
+            {
+                Console.Error.WriteLine(
+                    "[devhub] telemetry copilot-seats: 次の環境変数が未設定です: " +
+                    $"{string.Join(", ", missing)}。OS 環境変数またはリポジトリルートの .env に設定してください。");
+                return 2;
+            }
+
+            var salt = ResolveVar("DEVHUB_TELEMETRY_SALT");
+            var bearerToken = ResolveVar("DEVHUB_TELEMETRY_TOKEN");
+            var timeoutMs = ParseTelemetryTimeoutMs(ResolveVar("DEVHUB_TELEMETRY_TIMEOUT_MS"));
+            var apiBaseUrl = ResolveVar("DEVHUB_TELEMETRY_COPILOT_API_BASE_URL");
+
+            IReadOnlyList<string> pages;
+            try
+            {
+                var client = new CopilotSeatsClient(apiBaseUrl, TimeSpan.FromSeconds(30));
+                pages = client.FetchAllSeatPagesRaw(org!, token!);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"[devhub] telemetry copilot-seats: GitHub API の呼び出しに失敗しました: {ex.Message}");
+                return 1;
+            }
+
+            var candidates = new List<CopilotSeatCandidate>();
+            foreach (var page in pages)
+            {
+                candidates.AddRange(CopilotSeatEventExtractor.ExtractFromResponseJson(page));
+            }
+
+            var statePath = Path.Combine(GetHomeDirectory(), ".devhub", "telemetry-copilot-state", $"{org}.json");
+            var previousState = ReadCopilotStateSilently(statePath);
+
+            var seatItems = candidates
+                .Select(c => new CopilotSeatSendItem(
+                    TelemetryAnonymizer.Hash(salt, c.RawLogin), c.LastActivityAt, c.AgentType))
+                .ToList();
+
+            var plan = CopilotSeatDiffPlanner.Plan(seatItems, previousState);
+
+            var sender = new TelemetrySender(TimeSpan.FromMilliseconds(timeoutMs));
+            var sentCount = 0;
+            var failedUserIds = new List<string>();
+
+            foreach (var item in plan.ToSend)
+            {
+                var outbound = new TelemetryOutboundEvent(
+                    Schema: 1,
+                    Event: "copilot_activity",
+                    Agent: "copilot",
+                    ToolName: null,
+                    AgentType: item.AgentType,
+                    SessionId: null,
+                    UserId: item.UserId,
+                    Timestamp: item.LastActivityAt);
+
+                var json = JsonSerializer.Serialize(outbound);
+                if (sender.Send(endpoint!, json, bearerToken))
+                {
+                    sentCount++;
+                }
+                else
+                {
+                    failedUserIds.Add(item.UserId);
+                }
+            }
+
+            // 送信に失敗した seat は状態を前回値のまま残す(新規ユーザーなら未記録のまま)。
+            // これにより次回実行時に再送対象として扱われる(純粋関数化: CopilotSeatDiffPlanner.ReconcileAfterSend)。
+            var finalState = CopilotSeatDiffPlanner.ReconcileAfterSend(plan, previousState, failedUserIds);
+            WriteCopilotStateSilently(statePath, finalState);
+
+            Console.WriteLine(
+                $"[devhub] telemetry copilot-seats: 組織 '{org}' の seat {candidates.Count} 件中 " +
+                $"{plan.ToSend.Count} 件が送信対象(差分あり)と判定され、{sentCount} 件を送信しました。");
+            return 0;
+        }
+
+        /// <summary>
+        /// copilot-seats の状態ファイル(user_id→last_activity_at の JSON)を読み取る。存在しない・
+        /// パース不能な場合は空の辞書を返す(=全ユーザーを初回として扱う。頑健性優先)。
+        /// </summary>
+        private static IReadOnlyDictionary<string, string> ReadCopilotStateSilently(string statePath)
+        {
+            try
+            {
+                var text = File.ReadAllText(statePath);
+                var parsed = JsonSerializer.Deserialize<Dictionary<string, string>>(text);
+                return parsed ?? new Dictionary<string, string>();
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+        }
+
+        /// <summary>copilot-seats の状態ファイルを書き込む。失敗しても致命的ではないため無視する。</summary>
+        private static void WriteCopilotStateSilently(string statePath, IReadOnlyDictionary<string, string> state)
         {
             try
             {
@@ -1005,6 +1164,9 @@ namespace Devhub.Tool
                                             hook ペイロード(stdin)を正規化・匿名化して送信(常に exit 0)
                   devhub telemetry scan-transcripts [--backfill]
                                             Claude Code トランスクリプトを増分走査し skill 利用を送信(常に exit 0)
+                  devhub telemetry copilot-seats
+                                            GitHub Copilot の seat 利用有無を送信(管理者向け。設定不足は exit 2、
+                                            GitHub API 失敗は exit 1、成功は exit 0 で送信件数を表示)
                   devhub --version          バージョン表示
                   devhub --help             このヘルプ
 
@@ -1078,6 +1240,30 @@ namespace Devhub.Tool
 
                   devhub telemetry(サブコマンド省略)・未知サブコマンドは通常コマンドと同様に exit 2 で
                   ヘルプ誘導する(沈黙・exit 0 契約の対象は hook から呼ばれる send / scan-transcripts のみ)。
+
+                devhub telemetry copilot-seats:
+                  GitHub Copilot Billing Seats API(GET /orgs/{org}/copilot/billing/seats)から seat 一覧を
+                  取得し、seat ごとの last_activity_at(=利用有無)を copilot_activity イベントとして
+                  telemetry send と同じ DEVHUB_TELEMETRY_ENDPOINT へ送信する。
+                  制約(FR-4.4 / D-P2-8): Copilot は設定単位(skill/subagent/MCP)の可視化が公式に不可能で、
+                  取得できるのは「利用有無」までであり、設定別の内訳は得られない。
+
+                  hook から呼ばれる send / scan-transcripts と異なり管理者が手動実行するコマンドであり
+                  沈黙契約は適用しない:
+                    設定不足(下記環境変数が未設定) → 日本語エラーを表示して exit 2
+                    GitHub API 呼び出し失敗            → exit 1
+                    成功                                → exit 0、送信件数を表示
+
+                  環境変数(いずれも DEVHUB_TELEMETRY_* と同じ「OS 環境変数 → .env」の2段解決):
+                    DEVHUB_TELEMETRY_ENDPOINT               送信先(telemetry send と共通)
+                    DEVHUB_TELEMETRY_COPILOT_ORG            GitHub organization スラッグ
+                    DEVHUB_TELEMETRY_COPILOT_TOKEN          GitHub API 呼び出し用トークン(生値は非表示)
+                    DEVHUB_TELEMETRY_SALT                   HMAC 鍵(telemetry send と共通)
+                    DEVHUB_TELEMETRY_COPILOT_API_BASE_URL   GitHub API のベース URL(既定 https://api.github.com。
+                                                             GitHub Enterprise Server 等の差し替え用。省略可)
+
+                  差分送信: ~/.devhub/telemetry-copilot-state/<org>.json に user_id(HMAC後) → 送信済み
+                  last_activity_at を記録し、前回と変化が無いユーザーはスキップする(定期実行での重複防止)。
                 """);
         }
     }
