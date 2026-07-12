@@ -90,11 +90,11 @@ status=$(curl -s -o /dev/null -w '%{http_code}' \
 [ "$status" -ge 200 ] && [ "$status" -lt 300 ] || fail "認証ありPOSTが${status}を返しました(2xx を期待)"
 log "  -> ${status} OK"
 
-log "検証2: devhub_tool_use_total{agent=\"claudecode\",agent_type=\"none\",tool_name=\"Bash\"} が /metrics に出るまで待機"
+log "検証2: devhub_tool_use_total{agent=\"claudecode\",agent_type=\"none\",event=\"post_tool_use\",tool_name=\"Bash\"} が /metrics に出るまで待機"
 waited=0
 found=0
 until [ "$found" = "1" ]; do
-  if curl -s "$COLLECTOR_METRICS_URL" | grep -E '^devhub_tool_use_total\{[^}]*agent="claudecode"[^}]*agent_type="none"[^}]*tool_name="Bash"[^}]*\} [0-9]' >/dev/null; then
+  if curl -s "$COLLECTOR_METRICS_URL" | grep -E '^devhub_tool_use_total\{[^}]*agent="claudecode"[^}]*agent_type="none"[^}]*event="post_tool_use"[^}]*tool_name="Bash"[^}]*\} [0-9]' >/dev/null; then
     found=1
     break
   fi

@@ -59,7 +59,9 @@ Step 3 の全成果物(OTTL 変換・ダッシュボード・アラート)が参
 
 | メトリクス | 型 | ラベル |
 |---|---|---|
-| `devhub_tool_use_total` | Counter(count connector で生成) | `tool_name`, `agent`, `agent_type` |
+| `devhub_tool_use_total` | Counter(count connector で生成) | `event`, `tool_name`, `agent`, `agent_type` |
+
+`event` ラベル(`post_tool_use` / `skill_use` 等)で hooks 由来のツール利用とトランスクリプト由来の skill 利用を区別する。skill 利用時は `tool_name` に skill 名が入る。
 
 当初予定していた `devhub_last_used_timestamp`(Gauge)は **Collector 内で生成できないことが実装時に判明**した(count 系コネクタはカウンタ専用)。最終利用日時は Loki(LogQL の `last_over_time`)のパネルで表現し、未使用検出は PromQL `increase(devhub_tool_use_total[閾値d]) == 0` で行う(閾値は Grafana 変数 `unused_threshold_days`、既定 30)。
 
@@ -100,7 +102,11 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
    - **トークンの秘匿**: Collector 設定は env 展開構文(`${env:DEVHUB_TELEMETRY_TOKEN}`)を使い、docker-compose は gitignore 済み `.env` から読む(`.env.example` に変数名のみ記載)。実値はいかなる同梱ファイルにも書かない(NFR-1)。`devhub secrets` のスキャン対象に `telemetry/` を追加し CI で機械検出する。
    - **契約テスト**: OTTL 変換は実質ロジックなので、「サンプルイベント JSON を POST → `/metrics` を scrape → 期待メトリクスを検証」する自動化スクリプトを同梱する(Phase 1 の「純粋ロジックは必ずテスト」の収集側版)。
    - **方針の外出し**: 未使用判定の閾値(既定 30 日)は Grafana アラートルールの変数として外出しし、Loki 保持期間(既定 90 日)も設定 1 箇所に集約する。
-6. **Step 4 — skill 補完**: Claude Code トランスクリプト(`~/.claude/projects/**/*.jsonl`、既定 30 日で消えるため期限内回収)から skill 利用を抽出して同エンドポイントへ送る `devhub telemetry scan-transcripts`(仮)。**起動トリガーは hooks に統合**する(`sessionEnd` 等で自動起動し、前回走査位置を記録して増分処理。別スケジューラを要求しない)。`send` と同じ no-op スイッチ・沈黙契約を適用する。**送信前にレダクション必須**(トランスクリプトにはコード断片が含まれる。tool 名・skill 名・タイムスタンプのみ抽出し、本文は送らない)。
+6. **Step 4 — skill 補完(実装済み)**: `devhub telemetry scan-transcripts` が Claude Code トランスクリプト(`~/.claude/projects/<encoded-cwd>/`。メインの `<sessionId>.jsonl` と `subagents/agent-*.jsonl` の両方)から skill 利用を抽出して `event: "skill_use"` で送信する。実装仕様(実機フォーマット調査にもとづく):
+   - **確実なシグナルのみ計数**: `name=="Skill"` の tool_use ブロックの `input.skill`。`attachment.type=="skill_listing"`(メニュー表示)と `attributionSkill`(活性中の全行に付与)は計数に使わない。**`input.args` は会話内容のため読まない・送らない**(レダクション)。
+   - **増分走査**: ファイル別バイトオフセットを `~/.devhub/telemetry-scan-state/<encoded-cwd>.json` に記録(トランスクリプトは追記専用であることを実証済み)。書き込み途中の末尾不完全行は据え置き。**初回は EOF を記録するのみで過去分を送らない**(`--backfill` で全履歴をオプトイン)。1回の実行で最大 1000 件。
+   - **起動トリガー**: hooks テンプレートの claudecode オーバーライドに `sessionEnd` で統合(rulesync@9.2.0 で `SessionEnd` へ変換されることを実測)。`send` と同じ no-op スイッチ・沈黙契約。
+   - **制約**: Prometheus のカウントは取り込み時刻で計上される(count connector の性質)。イベントの原時刻は Loki の本文にのみ保持されるため、`--backfill` した過去分はメトリクス上「実行時点の利用」として見える。
 7. **Step 5 — Copilot(任意)**: Billing Seats API の `last_activity_at` による利用有無の取り込み。優先度低。
 
 ## リスク・注意点
@@ -111,3 +117,4 @@ hook から同期実行されるため(Claude Code の PostToolUse はツール�
 - **Codex の信頼登録**: `devhub apply` で hooks を配布しても、各開発者が初回に `/hooks` で承認しないと動かない。オンボーディング手順に明記する。
 - **認証**: bearertokenauth の静的トークンはローテーション運用をチームで決める(ファイルベース差し替え可)。収集エンドポイントはチーム内クローズドに置く(NFR-1)。
 - **Cursor の subagent 粒度**: 固定カテゴリのみのため、カスタム subagent 別の集計は Claude Code / Codex に限られる。ダッシュボードに注記。
+- **ネイティブ Windows のトランスクリプトパスは実機未検証**: `~/.claude/projects/` のプロジェクトパスエンコード(`/`→`-`)は WSL/Linux で実機確認済みだが、ネイティブ Windows(`C:\...`、特にドライブレターのコロンの扱い)は未検証(開発環境の Windows 側に Claude Code 利用実績が無く確認不能だった)。ネイティブ Windows 利用者が出た時点で `TranscriptProjectPathEncoder` の期待値を実機確認すること(R-3 の in-flux 項目)。

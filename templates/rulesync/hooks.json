@@ -15,6 +15,18 @@
             "DEVHUB_TELEMETRY_SALT": "${DEVHUB_TELEMETRY_SALT}"
           }
         }
+      ],
+      "sessionEnd": [
+        {
+          "type": "command",
+          "command": "dotnet devhub telemetry scan-transcripts",
+          "timeout": 30,
+          "env": {
+            "DEVHUB_TELEMETRY_ENDPOINT": "${DEVHUB_TELEMETRY_ENDPOINT}",
+            "DEVHUB_TELEMETRY_TOKEN": "${DEVHUB_TELEMETRY_TOKEN}",
+            "DEVHUB_TELEMETRY_SALT": "${DEVHUB_TELEMETRY_SALT}"
+          }
+        }
       ]
     }
   },

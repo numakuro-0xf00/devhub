@@ -1,6 +1,6 @@
 # devhub telemetry 収集基盤
 
-`devhub telemetry send`(および将来の `devhub telemetry scan-transcripts`)が送るイベントを受信し、
+`devhub telemetry send` / `devhub telemetry scan-transcripts` が送るイベントを受信し、
 Prometheus + Loki + Grafana で可視化する基盤。設計は `doc/phase2.md` を参照(本ディレクトリはその Step 3)。
 
 構成: OTel Collector(webhookeventreceiver + bearertokenauth 認証)→ transform processor(OTTL)で
